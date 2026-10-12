@@ -195,6 +195,48 @@ function groupTasksByStatus(tasks) {
   }));
 }
 
+// ===== 按兵种分组（哨兵 / 狗洞步兵 / 轮腿步兵 / 重装；其余归"其他"）=====
+const UNIT_ORDER = ['哨兵', '狗洞步兵', '轮腿步兵', '重装'];
+
+function taskUnit(task) {
+  const p = (task.project || '').trim();
+  if (p.includes('哨兵')) return '哨兵';
+  if (p.includes('狗洞')) return '狗洞步兵';
+  if (p.includes('轮腿')) return '轮腿步兵';
+  if (p.includes('重装')) return '重装';
+  return '其他';
+}
+
+function unitSubSummary(unitTasks) {
+  const active = unitTasks.filter((t) => t.status !== '已取消');
+  if (!active.length) return '';
+  const doing = active.filter((t) => t.status === '进行中').length;
+  const done = active.filter((t) => t.status === '已完成').length;
+  const overdue = active.filter(isOverdue).length;
+  let text = '';
+  if (doing) text += `进行中 ${doing}`;
+  if (done) text += (text ? ' · ' : '') + `已完成 ${done}`;
+  if (overdue) text += (text ? ' · ' : '') + `逾期 ${overdue}`;
+  return text || '全部未开始';
+}
+
+function groupTasksByUnit(tasks) {
+  const groups = UNIT_ORDER.map((unit) => {
+    const unitTasks = tasks.filter((t) => taskUnit(t) === unit);
+    return {
+      key: `u-${unit}`,
+      title: unit,
+      sub: unitSubSummary(unitTasks),
+      tasks: unitTasks,
+    };
+  });
+  const others = tasks.filter((t) => taskUnit(t) === '其他');
+  if (others.length) {
+    groups.push({ key: 'u-others', title: '其他', sub: unitSubSummary(others), tasks: others });
+  }
+  return groups;
+}
+
 // ===== 任务卡片渲染（状态 / 优先级 / 剩余天数徽章 / 逾期红线）=====
 function taskCard(task) {
   const owner = memberById(task.owner_id);
@@ -221,9 +263,12 @@ function taskCard(task) {
 // ===== 看板渲染：按人 / 按状态 两种视图 ===== 
 function renderBoard() {
   const tasks = filteredTasks();
-  const groups = state.view === 'person' ? groupTasksByPerson(tasks) : groupTasksByStatus(tasks);
+  let groups;
+  if (state.view === 'person') groups = groupTasksByPerson(tasks);
+  else if (state.view === 'unit') groups = groupTasksByUnit(tasks);
+  else groups = groupTasksByStatus(tasks);
   const hasFilter = !!(state.filters.group || state.filters.status || state.filters.q || state.filters.mine);
-  const visible = state.view === 'person' && hasFilter
+  const visible = hasFilter && state.view !== 'status'
     ? groups.filter((g) => g.tasks.length)
     : groups;
   document.getElementById('board').innerHTML = visible.map((g) => `
