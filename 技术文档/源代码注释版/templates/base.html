@@ -6,11 +6,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0f172a">
   <title>{% block title %}进度系统{% endblock %} | 巡天御风管理系统</title>
+  <link rel="icon" type="image/png" sizes="64x64" href="{{ url_for('static', filename='logo-64.png') }}">
+  <link rel="apple-touch-icon" href="{{ url_for('static', filename='logo.png') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">巡天御风<span>管理系统</span></div>
+    <div class="brand"><img class="brand-logo" src="{{ url_for('static', filename='logo.png') }}" alt="">巡天御风<span>管理系统</span></div>
     {% if me %}
     <nav class="nav">
       <a href="{{ url_for('index') }}" class="{% if page == 'board' %}active{% endif %}">看板</a>

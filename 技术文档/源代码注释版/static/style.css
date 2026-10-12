@@ -43,8 +43,10 @@ a { color: var(--primary); text-decoration: none; }
   flex-wrap: wrap;
 }
 
-.brand { font-weight: 700; font-size: 16px; letter-spacing: .5px; }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 16px; letter-spacing: .5px; }
 .brand span { color: #7dd3fc; font-weight: 400; }
+.brand-logo { height: 26px; width: auto; display: block; }
+.login-logo { width: 96px; height: 96px; object-fit: contain; margin: 0 auto 2px; display: block; }
 
 .nav { display: flex; gap: 4px; flex: 1; }
 .nav a {
@@ -400,6 +402,22 @@ tbody tr:hover { background: #f8fafc; }
 .login-card input { border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; font-size: 14px; }
 .error { color: var(--red); font-size: 13px; margin: 0; text-align: center; }
 .hidden { display: none; }
+
+.review-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  background: #fff;
+}
+.review-head { display: flex; align-items: center; gap: 8px; }
+.review-head h3 { margin: 0; font-size: 14px; flex: 1; }
+.review-meta { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+.review-diff { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+.review-diff th, .review-diff td { border-bottom: 1px solid var(--border); padding: 5px 8px; text-align: left; }
+.review-diff th { color: var(--muted); font-weight: 600; }
+.review-new { color: var(--primary); font-weight: 600; }
+.review-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 
 /* ===== 移动端适配 ===== */
 @media (max-width: 860px) {

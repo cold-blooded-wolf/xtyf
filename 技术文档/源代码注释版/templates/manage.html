@@ -19,6 +19,11 @@
   </form>
 </section>
 
+<section class="panel" id="review-panel">
+  <h2>任务审核 <span class="muted" id="review-count"></span></h2>
+  <div id="review-list"><p class="empty">加载中…</p></div>
+</section>
+
 <section class="panel">
   <h2>任务列表 <span class="muted" id="task-count"></span></h2>
   <div class="toolbar">
@@ -30,7 +35,7 @@
     <!-- 任务列表：支持搜索/组别/状态筛选；行内可编辑、删除 -->
 <table id="task-table">
       <thead>
-        <tr><th>ID</th><th>任务</th><th>负责人</th><th>组别</th><th>项目</th><th>优先级</th><th>状态</th><th>剩余天数</th><th>截止</th><th>操作</th></tr>
+        <tr><th>ID</th><th>任务</th><th>负责人</th><th>组别</th><th>项目</th><th>优先级</th><th>状态</th><th>审核</th><th>剩余天数</th><th>截止</th><th>操作</th></tr>
       </thead>
       <tbody></tbody>
     </table>
@@ -140,6 +145,7 @@ function renderTaskTable() {
       <td>${esc(t.project)}</td>
       <td>${priorityCell(t.priority)}</td>
       <td>${esc(t.status)}</td>
+      <td>${reviewCell(t)}</td>
       <td>${badge(daysLeftText(t), daysLeftClass(t))}</td>
       <td>${esc(t.due_date)}</td>
       <td class="nowrap">
@@ -197,6 +203,88 @@ function renderMemberTable() {
   </tr>`).join('');
 }
 
+const REVIEW_FIELDS = { title: '标题', owner_id: '负责人', group_name: '组别', project: '项目', priority: '优先级', start_date: '开始日期', due_date: '截止日期', detail: '说明' };
+
+function reviewValueText(key, value) {
+  if (key === 'owner_id') {
+    const m = allMembers.find((x) => x.id === value) || state.members.find((x) => x.id === value);
+    return m ? m.name : (value || '未分配');
+  }
+  return (value === null || value === undefined || value === '') ? '（空）' : String(value);
+}
+
+function renderReviewCard(t) {
+  const isEdit = t.type === 'edit';
+  const owner = state.members.find((m) => m.id === t.owner_id) || allMembers.find((m) => m.id === t.owner_id);
+  const meta = `负责人：${esc(owner ? owner.name : '未分配')} · 提交人：${esc(t.creator_name || '—')} · 优先级：${esc(t.priority || '中')} · 状态：${esc(t.status || '未开始')}${t.due_date ? ' · 截止：' + esc(t.due_date) : ''}`;
+  let body = '';
+  if (isEdit) {
+    body = `<table class="review-diff">
+      <thead><tr><th>字段</th><th>当前</th><th>改为</th></tr></thead><tbody>
+      ${Object.keys(t.pending).map((k) => `<tr><td>${REVIEW_FIELDS[k] || k}</td><td>${esc(reviewValueText(k, t[k]))}</td><td class="review-new">${esc(reviewValueText(k, t.pending[k]))}</td></tr>`).join('')}
+      </tbody></table>`;
+  } else if (t.detail) {
+    body = `<p class="task-detail">${esc(t.detail)}</p>`;
+  }
+  return `<div class="review-card">
+    <div class="review-head">
+      <h3>${esc(t.title)}</h3>
+      ${isEdit ? badge('修改申请', 'orange') : badge('新任务', 'blue')}
+    </div>
+    <p class="review-meta">${meta}</p>
+    ${body}
+    <div class="review-actions">
+      <button class="btn ghost sm" type="button" data-reject="${t.id}">不通过</button>
+      <button class="btn primary sm" type="button" data-approve="${t.id}">通过</button>
+    </div>
+  </div>`;
+}
+
+function reviewCell(t) {
+  const rs = t.review_status || '已通过';
+  if (rs === '待审核') return badge('待审核', 'blue');
+  if (rs === '需修改') return badge('需修改', 'red');
+  if (t.pending_changes && t.pending_changes.length > 2) return badge('修改待审核', 'orange');
+  return '<span class="muted">—</span>';
+}
+
+async function loadReviews() {
+  const box = document.getElementById('review-list');
+  if (!box) return;
+  const data = await api('/api/review_list');
+  if (!data || !data.ok) {
+    box.innerHTML = '<p class="empty">加载失败</p>';
+    return;
+  }
+  document.getElementById('review-count').textContent = data.items.length ? `共 ${data.items.length} 条待处理` : '暂无待审核';
+  if (!data.items.length) {
+    box.innerHTML = '<p class="empty">暂无待审核的任务</p>';
+    return;
+  }
+  box.innerHTML = data.items.map(renderReviewCard).join('');
+  box.querySelectorAll('[data-approve]').forEach((b) => {
+    b.addEventListener('click', () => doReview(b.dataset.approve, 'approve'));
+  });
+  box.querySelectorAll('[data-reject]').forEach((b) => {
+    b.addEventListener('click', () => doReview(b.dataset.reject, 'reject'));
+  });
+}
+
+async function doReview(id, action) {
+  let note = '';
+  if (action === 'reject') {
+    note = prompt('请输入不通过原因（会写入任务历史）：', '请修改后重新提交');
+    if (note === null) return;
+  }
+  const res = await api(`/api/task/${id}/review`, { action, note });
+  if (res && res.ok) {
+    alert(res.message || '已处理');
+    loadManage();
+  } else {
+    alert((res && res.error) || '操作失败');
+  }
+}
+
 async function loadManage() {
   await refresh();
   const data = await api('/api/members');
@@ -205,6 +293,7 @@ async function loadManage() {
     buildMemberFilterOptions();
     renderMemberTable();
   }
+  await loadReviews();
 }
 
 window.onData = () => {

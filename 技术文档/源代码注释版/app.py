@@ -16,6 +16,7 @@
 # ---- 标准库 ----
 import csv
 import io
+import json
 import os
 import secrets
 import sqlite3
@@ -119,6 +120,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     progress INTEGER DEFAULT 0,
     start_date TEXT DEFAULT '',
     due_date TEXT DEFAULT '',
+    review_status TEXT DEFAULT '已通过',
+    pending_changes TEXT DEFAULT '',
     created_by INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -148,6 +151,11 @@ def init_db():
     db = sqlite3.connect(DB_PATH)
     try:
         db.executescript(SCHEMA)
+        cols = [row[1] for row in db.execute("PRAGMA table_info(tasks)").fetchall()]
+        if "review_status" not in cols:
+            db.execute("ALTER TABLE tasks ADD COLUMN review_status TEXT DEFAULT '已通过'")
+        if "pending_changes" not in cols:
+            db.execute("ALTER TABLE tasks ADD COLUMN pending_changes TEXT DEFAULT ''")
         count = db.execute("SELECT COUNT(*) AS c FROM members").fetchone()[0]
         if count == 0:
             db.execute(
@@ -232,6 +240,12 @@ def api_data():
     ).fetchall()]
     # 剩余天数 = 截止日期 - 今天（服务器时区已是北京时间，每天自动变化）
     # 前端按 days_left 显示：>3 蓝 / <=3 橙 / <0 红 / 无截止灰
+    user = current_user()
+    if user["role"] not in ("admin", "manager"):
+        tasks = [t for t in tasks
+                 if t.get("review_status") != "待审核"
+                 or t.get("created_by") == user["id"]
+                 or t.get("owner_id") == user["id"]]
     today = datetime.now().date()
     for task in tasks:
         due = (task.get("due_date") or "").strip()
@@ -258,12 +272,14 @@ def api_members():
 
 # ==================== 任务 API（新建 / 更新 / 删除 / 历史）====================
 @app.route("/api/task", methods=["POST"])
-@manager_required
+@login_required
 def api_task_create():
+    user = current_user()
     data = request.get_json(silent=True) or {}
     title = (data.get("title") or "").strip()
     if not title:
         return jsonify(ok=False, error="任务标题不能为空"), 400
+    is_manager = user["role"] in ("admin", "manager")
     owner_id = parse_int(data.get("owner_id"), 0) or None
     group_name = (data.get("group_name") or "").strip()
     db = get_db()
@@ -271,19 +287,28 @@ def api_task_create():
         row = db.execute("SELECT group_name FROM members WHERE id = ?", (owner_id,)).fetchone()
         if row:
             group_name = row["group_name"] or ""
-    status = data.get("status") if data.get("status") in STATUSES else "未开始"
+    status = data.get("status") if (is_manager and data.get("status") in STATUSES) else "未开始"
     priority = data.get("priority") if data.get("priority") in PRIORITIES else "中"
+    review_status = "已通过" if is_manager else "待审核"
     cur = db.execute(
         "INSERT INTO tasks (title, detail, owner_id, group_name, project, priority, status, progress, "
-        "start_date, due_date, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "start_date, due_date, review_status, pending_changes, created_by, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (title, (data.get("detail") or "").strip(), owner_id, group_name,
          (data.get("project") or "").strip(), priority, status,
          0,
          (data.get("start_date") or "").strip(), (data.get("due_date") or "").strip(),
-         current_user()["id"], now_str(), now_str()),
+         review_status, "",
+         user["id"], now_str(), now_str()),
+    )
+    db.execute(
+        "INSERT INTO logs (task_id, member_id, member_name, note, changes, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (cur.lastrowid, user["id"], user["name"],
+         "创建任务" if is_manager else "提交任务，等待管理员审核", "", now_str()),
     )
     db.commit()
-    return jsonify(ok=True, id=cur.lastrowid)
+    return jsonify(ok=True, id=cur.lastrowid,
+                   message=("已创建" if is_manager else "已提交，等待管理员审核"))
 
 
 # —— 更新任务：权限分级 —— 负责人本人只能改“状态/备注”；manager+ 可改全部字段
@@ -298,12 +323,43 @@ def api_task_update(task_id):
     data = request.get_json(silent=True) or {}
     is_manager = user["role"] in ("admin", "manager")
     is_owner = row["owner_id"] == user["id"]
-    if not (is_manager or is_owner):
+    is_creator = row["created_by"] == user["id"]
+    if not (is_manager or is_owner or is_creator):
         return jsonify(ok=False, error="无权限"), 403
 
     old = dict(row)
-    new_values = {}
-    if is_manager:
+    review_status = old.get("review_status") or "已通过"
+    old_pending = {}
+    if old.get("pending_changes"):
+        try:
+            old_pending = json.loads(old["pending_changes"])
+        except Exception:
+            old_pending = {}
+
+    def fmt_change(key, old_value, value):
+        if key == "owner_id":
+            return f"负责人: {member_name(db, old_value)} → {member_name(db, value)}"
+        return f"{FIELD_NAMES.get(key, key)}: {old_value} → {value}"
+
+    def diff_changes(values):
+        changes = []
+        for key, value in values.items():
+            old_value = old.get(key)
+            if key == "owner_id":
+                if old_value != value:
+                    changes.append(fmt_change(key, old_value, value))
+            elif str(old_value) != str(value):
+                changes.append(fmt_change(key, old_value, value))
+        return changes
+
+    def write_log(entry_note, changes):
+        db.execute(
+            "INSERT INTO logs (task_id, member_id, member_name, note, changes, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (task_id, user["id"], user["name"], entry_note, "；".join(changes), now_str()),
+        )
+
+    detail_values = {}
+    if is_manager or is_creator:
         for key in MANAGER_FIELDS:
             if key in data:
                 value = data[key]
@@ -315,36 +371,70 @@ def api_task_update(task_id):
                     value = parse_int(value, 0) or None
                 elif isinstance(value, str):
                     value = value.strip()
-                new_values[key] = value
-    if "status" in data:
-        status = data.get("status")
-        if status not in STATUSES:
-            return jsonify(ok=False, error="状态不合法"), 400
-        new_values["status"] = status
+                detail_values[key] = value
 
-    changes = []
-    for key, value in new_values.items():
-        old_value = old.get(key)
-        if key == "owner_id":
-            if old_value != value:
-                changes.append(f"负责人: {member_name(db, old_value)} → {member_name(db, value)}")
-        elif str(old_value) != str(value):
-            changes.append(f"{FIELD_NAMES.get(key, key)}: {old_value} → {value}")
+    status_value = None
+    if "status" in data and (is_manager or is_owner):
+        status_value = data.get("status")
+        if status_value not in STATUSES:
+            return jsonify(ok=False, error="状态不合法"), 400
 
     note = (data.get("note") or "").strip()
-    if not changes and not note:
+
+    if is_manager:
+        new_values = dict(detail_values)
+        if status_value is not None:
+            new_values["status"] = status_value
+        if old_pending:
+            new_values["pending_changes"] = ""
+            note = (note + "（管理员直接修改，原有待审核修改已覆盖）").strip()
+        changes = diff_changes({k: v for k, v in new_values.items() if k != "pending_changes"})
+        if new_values:
+            new_values["updated_at"] = now_str()
+            sets = ", ".join(f"{key} = ?" for key in new_values)
+            db.execute(f"UPDATE tasks SET {sets} WHERE id = ?", list(new_values.values()) + [task_id])
+        if changes or note:
+            write_log(note, changes)
+        db.commit()
         return jsonify(ok=True)
 
-    if new_values:
-        new_values["updated_at"] = now_str()
-        sets = ", ".join(f"{key} = ?" for key in new_values)
-        db.execute(f"UPDATE tasks SET {sets} WHERE id = ?", list(new_values.values()) + [task_id])
-    db.execute(
-        "INSERT INTO logs (task_id, member_id, member_name, note, changes, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (task_id, user["id"], user["name"], note, "；".join(changes), now_str()),
-    )
+    message = ""
+    if detail_values:
+        if review_status == "需修改":
+            new_values = dict(detail_values)
+            new_values["review_status"] = "待审核"
+            new_values["updated_at"] = now_str()
+            sets = ", ".join(f"{key} = ?" for key in new_values)
+            db.execute(f"UPDATE tasks SET {sets} WHERE id = ?", list(new_values.values()) + [task_id])
+            write_log("已修改并重新提交审核", diff_changes(detail_values))
+            message = "已重新提交审核"
+        elif review_status == "待审核":
+            new_values = dict(detail_values)
+            new_values["updated_at"] = now_str()
+            sets = ", ".join(f"{key} = ?" for key in new_values)
+            db.execute(f"UPDATE tasks SET {sets} WHERE id = ?", list(new_values.values()) + [task_id])
+            write_log("修改待审核内容", diff_changes(detail_values))
+            message = "已更新（仍待管理员审核）"
+        else:
+            merged = dict(old_pending)
+            merged.update(detail_values)
+            db.execute("UPDATE tasks SET pending_changes = ? WHERE id = ?",
+                       (json.dumps(merged, ensure_ascii=False), task_id))
+            write_log("提交修改，等待管理员审核", diff_changes(detail_values))
+            message = "已提交修改，等待管理员审核"
+
+    if status_value is not None:
+        db.execute("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+                   (status_value, now_str(), task_id))
+        if str(old.get("status")) != str(status_value):
+            write_log(note, [f"状态: {old.get('status')} → {status_value}"])
+        elif note:
+            write_log(note, [])
+    elif note and not detail_values:
+        write_log(note, [])
+
     db.commit()
-    return jsonify(ok=True)
+    return jsonify(ok=True, message=message)
 
 
 @app.route("/api/task/<int:task_id>/delete", methods=["POST"])
@@ -365,6 +455,100 @@ def api_task_logs(task_id):
         (task_id,),
     ).fetchall()
     return jsonify(ok=True, logs=[dict(r) for r in rows])
+
+
+@app.route("/api/review_list")
+@manager_required
+def api_review_list():
+    db = get_db()
+    rows = db.execute(
+        "SELECT t.*, c.name AS creator_name, o.name AS owner_name "
+        "FROM tasks t LEFT JOIN members c ON c.id = t.created_by "
+        "LEFT JOIN members o ON o.id = t.owner_id "
+        "WHERE t.review_status = '待审核' "
+        "   OR (t.pending_changes IS NOT NULL AND t.pending_changes != '') "
+        "ORDER BY t.id DESC"
+    ).fetchall()
+    items = []
+    for row in rows:
+        item = dict(row)
+        pending = {}
+        if item.get("pending_changes"):
+            try:
+                pending = json.loads(item["pending_changes"])
+            except Exception:
+                pending = {}
+        item["pending"] = pending
+        item["type"] = "edit" if pending else "new"
+        items.append(item)
+    return jsonify(ok=True, items=items)
+
+
+@app.route("/api/task/<int:task_id>/review", methods=["POST"])
+@manager_required
+def api_task_review(task_id):
+    user = current_user()
+    data = request.get_json(silent=True) or {}
+    action = data.get("action")
+    note = (data.get("note") or "").strip()
+    if action not in ("approve", "reject"):
+        return jsonify(ok=False, error="参数错误"), 400
+    db = get_db()
+    row = db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None:
+        return jsonify(ok=False, error="任务不存在"), 404
+    task = dict(row)
+    pending = {}
+    if task.get("pending_changes"):
+        try:
+            pending = json.loads(task["pending_changes"])
+        except Exception:
+            pending = {}
+    review_status = task.get("review_status") or "已通过"
+    if not pending and review_status != "待审核":
+        return jsonify(ok=False, error="该任务无需审核"), 400
+
+    def write_log(entry_note, changes_text):
+        db.execute(
+            "INSERT INTO logs (task_id, member_id, member_name, note, changes, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (task_id, user["id"], user["name"], entry_note, changes_text, now_str()),
+        )
+
+    if action == "approve":
+        if pending:
+            changes = []
+            new_values = dict(pending)
+            for key, value in pending.items():
+                old_value = task.get(key)
+                if key == "owner_id":
+                    if old_value != value:
+                        changes.append(f"负责人: {member_name(db, old_value)} → {member_name(db, value)}")
+                elif str(old_value) != str(value):
+                    changes.append(f"{FIELD_NAMES.get(key, key)}: {old_value} → {value}")
+            new_values["pending_changes"] = ""
+            new_values["updated_at"] = now_str()
+            sets = ", ".join(f"{key} = ?" for key in new_values)
+            db.execute(f"UPDATE tasks SET {sets} WHERE id = ?", list(new_values.values()) + [task_id])
+            message = "审核通过（修改已生效）"
+            if changes:
+                message += "：" + "；".join(changes)
+        else:
+            db.execute("UPDATE tasks SET review_status = '已通过', updated_at = ? WHERE id = ?",
+                       (now_str(), task_id))
+            message = "审核通过（任务已发布）"
+        write_log(message, "")
+        db.commit()
+        return jsonify(ok=True, message=message)
+
+    if pending:
+        db.execute("UPDATE tasks SET pending_changes = '' WHERE id = ?", (task_id,))
+    else:
+        db.execute("UPDATE tasks SET review_status = '需修改', updated_at = ? WHERE id = ?",
+                   (now_str(), task_id))
+    message = "审核不通过，需修改：" + (note or "请修改后重新提交")
+    write_log(message, "")
+    db.commit()
+    return jsonify(ok=True, message=message)
 
 
 # ==================== 成员管理：添加 / 批量导入 / 重置密码 / 角色 / 停用 ====================

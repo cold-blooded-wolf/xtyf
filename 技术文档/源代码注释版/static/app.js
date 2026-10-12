@@ -80,6 +80,15 @@ function badge(text, cls) {
   return `<span class="badge ${cls}">${esc(text)}</span>`;
 }
 
+function reviewBadge(task) {
+  const rs = task.review_status || '已通过';
+  const hasPending = !!(task.pending_changes && task.pending_changes.length > 2);
+  if (rs === '待审核') return badge('待审核', 'blue');
+  if (rs === '需修改') return badge('需修改', 'red');
+  if (hasPending) return badge('修改待审核', 'orange');
+  return '';
+}
+
 // ===== 数据轮询：每 5 秒；数据指纹未变化则不重绘（防闪烁）=====
 async function refresh() {
   const data = await api('/api/data');
@@ -197,6 +206,7 @@ function taskCard(task) {
   return `<article class="task ${overdue ? 'overdue' : ''}" data-id="${task.id}">
     <div class="task-head">
       <h3>${esc(task.title)}</h3>
+      ${reviewBadge(task)}
       ${badge(task.status, STATUS_CLASS[task.status] || 'gray')}
     </div>
     <div class="task-meta">
@@ -248,14 +258,61 @@ function ownerOptions(selected) {
 }
 
 // ===== 任务详情弹窗（本人可改状态；manager+ 全字段；含更新历史）=====
+function openCreateModal() {
+  const manager = isManager();
+  showModal(`
+    <div class="modal-head">
+      <h2>新建任务</h2>
+      <button type="button" class="btn ghost sm" id="modal-close">关闭</button>
+    </div>
+    <form id="create-task-form">
+      <label>任务标题<input name="title" required></label>
+      <div class="grid-2">
+        <label>负责人<select name="owner_id"><option value="">未分配</option>${state.members.map((m) => `<option value="${m.id}">${esc(m.name)}${m.group_name ? '（' + esc(m.group_name) + '）' : ''}</option>`).join('')}</select></label>
+        <label>组别<input name="group_name"></label>
+      </div>
+      <div class="grid-2">
+        <label>项目<input name="project"></label>
+        <label>优先级<select name="priority">${state.priorities.map((p) => `<option ${p === '中' ? 'selected' : ''}>${p}</option>`).join('')}</select></label>
+      </div>
+      <div class="grid-2">
+        <label>开始日期<input name="start_date" type="date"></label>
+        <label>截止日期<input name="due_date" type="date"></label>
+      </div>
+      <label>说明<textarea name="detail" rows="3"></textarea></label>
+      ${manager ? '' : '<p class="muted">提交后由管理员审核，审核通过后才会发布到看板</p>'}
+      <div class="modal-actions"><button type="submit" class="btn primary">${manager ? '创建任务' : '提交审核'}</button></div>
+    </form>
+  `);
+  document.getElementById('modal-close').addEventListener('click', hideModal);
+  document.getElementById('create-task-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const payload = {};
+    new FormData(event.target).forEach((value, key) => { payload[key] = value; });
+    const res = await api('/api/task', payload);
+    if (res && res.ok) {
+      hideModal();
+      refresh();
+      alert(res.message || '已创建');
+    } else {
+      alert((res && res.error) || '创建失败');
+    }
+  });
+}
+
 async function openTaskModal(id) {
   const task = state.tasks.find((t) => t.id === id);
   if (!task) return;
-  const editable = canEdit(task);
   const manager = isManager();
+  const isOwner = !!state.me && task.owner_id === state.me.id;
+  const isCreator = !!state.me && task.created_by === state.me.id;
+  const canDetail = manager || isCreator;
+  const canStatus = manager || isOwner;
+  const editable = canDetail || canStatus;
+  const rs = task.review_status || '已通过';
   let form = '';
   if (editable) {
-    if (manager) {
+    if (canDetail) {
       form += `
         <label>标题<input name="title" value="${esc(task.title)}"></label>
         <div class="grid-2">
@@ -265,26 +322,38 @@ async function openTaskModal(id) {
         <div class="grid-2">
           <label>项目<input name="project" value="${esc(task.project)}"></label>
           <label>优先级<select name="priority">${state.priorities.map((p) => `<option ${p === task.priority ? 'selected' : ''}>${p}</option>`).join('')}</select></label>
-        </div>`;
-    }
-    form += `
-      <div class="grid-2">
-        <label>状态<select name="status">${state.statuses.map((s) => `<option ${s === task.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
-        <label>剩余天数（自动计算）<input value="${daysLeftText(task)}" readonly></label>
-      </div>`;
-    if (manager) {
-      form += `
+        </div>
         <div class="grid-2">
           <label>开始日期<input name="start_date" type="date" value="${esc(task.start_date)}"></label>
           <label>截止日期<input name="due_date" type="date" value="${esc(task.due_date)}"></label>
         </div>
         <label>说明<textarea name="detail" rows="3">${esc(task.detail)}</textarea></label>`;
     }
+    if (canStatus) {
+      form += `
+      <div class="grid-2">
+        <label>状态<select name="status">${state.statuses.map((s) => `<option ${s === task.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
+        <label>剩余天数（自动计算）<input value="${daysLeftText(task)}" readonly></label>
+      </div>`;
+    } else {
+      form += `
+      <div class="grid-2">
+        <label>状态（仅负责人可改）<input value="${esc(task.status)}" readonly></label>
+        <label>剩余天数（自动计算）<input value="${daysLeftText(task)}" readonly></label>
+      </div>`;
+    }
+    let hint = '';
+    if (!manager) {
+      if (rs === '待审核') hint = '该任务正在等待管理员审核，修改将直接更新待审内容';
+      else if (rs === '需修改') hint = '保存后将重新提交管理员审核';
+      else hint = '保存后需管理员审核，通过后将更新到看板';
+    }
     form += `
       <label>本次更新备注<input name="note" placeholder="可留空"></label>
+      ${hint ? `<p class="muted">${hint}</p>` : ''}
       <div class="modal-actions">
         ${manager ? '<button type="button" class="btn danger" id="task-delete">删除任务</button>' : ''}
-        <button type="submit" class="btn primary">保存更新</button>
+        <button type="submit" class="btn primary">${manager ? '保存更新' : '提交'}</button>
       </div>`;
   }
 
@@ -303,6 +372,7 @@ async function openTaskModal(id) {
     </div>
     <div class="modal-info">
       ${badge(task.status, STATUS_CLASS[task.status] || 'gray')}
+      ${reviewBadge(task)}
       ${badge('负责人 ' + (owner ? owner.name : '未分配'), 'outline')}
       <span class="muted">${info}</span>
     </div>
@@ -351,6 +421,7 @@ async function openTaskModal(id) {
       if (res && res.ok) {
         hideModal();
         refresh();
+        if (res.message) alert(res.message);
       } else {
         alert((res && res.error) || '保存失败');
       }
@@ -411,6 +482,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
   bindPasswordButton();
+  const createBtn = document.getElementById('btn-create-task');
+  if (createBtn) createBtn.addEventListener('click', openCreateModal);
   if (document.getElementById('fundsPendingBadge')) {
     refreshFundsBadge();
     setInterval(refreshFundsBadge, 30000);

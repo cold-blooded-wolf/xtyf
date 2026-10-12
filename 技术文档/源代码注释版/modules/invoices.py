@@ -1634,14 +1634,17 @@ def create_index_html():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>巡天御风管理系统 · 发票管理</title>
+<link rel="icon" type="image/png" sizes="64x64" href="/static/logo-64.png">
+<link rel="apple-touch-icon" href="/static/logo.png">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:#f2f4f8;color:#1f2430;min-width:1024px}
 body.member .finance-only{display:none!important}
 body.member .col-check{display:none!important}
 .topbar{display:flex;align-items:center;gap:16px;padding:10px 18px;background:#0f172a;color:#e2e8f0;position:sticky;top:0;z-index:50;flex-wrap:wrap}
-.topbar .brand{font-weight:700;font-size:16px;letter-spacing:.5px}
+.topbar .brand{display:flex;align-items:center;gap:8px;font-weight:700;font-size:16px;letter-spacing:.5px}
 .topbar .brand span{color:#7dd3fc;font-weight:400}
+.brand-logo{height:26px;width:auto;display:block}
 .topbar .nav{display:flex;gap:4px;flex:1}
 .topbar .nav a{color:#cbd5e1;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:14px;transition:background .15s}
 .topbar .nav a:hover{background:rgba(255,255,255,.08)}
@@ -1794,7 +1797,7 @@ tr.row-dup{background:#fff3e0}
 <script>/*__APP_CONFIG__*/</script>
 
 <header class="topbar">
-<div class="brand">巡天御风<span>管理系统</span></div>
+<div class="brand"><img class="brand-logo" src="/static/logo.png" alt="">巡天御风<span>管理系统</span></div>
 <nav class="nav">
 <a href="/">看板</a>
 <a href="/funds/" class="finance-only">资金管理</a>
